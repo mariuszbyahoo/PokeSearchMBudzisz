@@ -5,11 +5,11 @@ using Microsoft.Extensions.Logging;
 
 namespace PokeSearchMBudzisz
 {
-    public class PokeApi
+    public class PokeSearchFunction
     {
-        private readonly ILogger<PokeApi> _logger;
+        private readonly ILogger<PokeSearchFunction> _logger;
 
-        public PokeApi(ILogger<PokeApi> logger)
+        public PokeSearchFunction(ILogger<PokeSearchFunction> logger)
         {
             _logger = logger;
         }
