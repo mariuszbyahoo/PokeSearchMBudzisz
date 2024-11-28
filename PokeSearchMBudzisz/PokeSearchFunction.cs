@@ -1,8 +1,11 @@
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Azure.Functions.Worker;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Primitives;
 using Microsoft.VisualBasic;
+using PokeSearchMBudzisz.Exceptions;
 using PokeSearchMBudzisz.Models;
 using RestSharp;
 using System.Net;
@@ -13,12 +16,13 @@ namespace PokeSearchMBudzisz
     public class PokeSearchFunction
     {
         private readonly ILogger<PokeSearchFunction> _logger;
-        private readonly RestClient _client;
+        private readonly IConfiguration _configuration;
+        private RestClient client;
 
-        public PokeSearchFunction(ILogger<PokeSearchFunction> logger)
+        public PokeSearchFunction(ILogger<PokeSearchFunction> logger, IConfiguration configuration)
         {
             _logger = logger;
-            _client = new RestClient("https://pokeapi.co/api/v2/");
+            _configuration = configuration;
         }
 
         [Function("SearchByName")]
@@ -27,48 +31,74 @@ namespace PokeSearchMBudzisz
             PokemonDetails? pokemonDetails = null;
             PokeFuncResponse pokeFuncResponse;
             var msg = "";
-            var name = httpRequest.Query["name"];
-            _logger.LogInformation($"SearchByName has been called with query param: {name}");
-
-            if (string.IsNullOrWhiteSpace(name))
+            try
             {
-                pokeFuncResponse = new PokeFuncResponse(HttpStatusCode.BadRequest, null, $"Missing '{nameof(name)}' query parameter, try again.");
-                _logger.LogInformation($"API received faulted request, missing query param");
-                return new BadRequestObjectResult(pokeFuncResponse);
-            }
+                var name = httpRequest.Query["name"];
+                _logger.LogInformation($"SearchByName has been called with query param: {name}");
 
-            var restRequest = new RestRequest($"pokemon/{name}");
-            var apiRes = await _client.ExecuteAsync(restRequest);
-
-            if (apiRes.IsSuccessStatusCode && apiRes.Content is not null)
-            {
-                pokemonDetails = ExtractFromJson(apiRes.Content);
-                if (pokemonDetails is null) 
+                if (string.IsNullOrWhiteSpace(name))
                 {
-                    msg = $"External API response code: {apiRes.StatusCode}, external API response faulted, data missing fields";
-                    pokeFuncResponse = new PokeFuncResponse(HttpStatusCode.BadGateway, null, msg);
+                    pokeFuncResponse = new PokeFuncResponse(HttpStatusCode.BadRequest, null, $"Missing '{nameof(name)}' query parameter, try again.");
+                    _logger.LogInformation($"API received faulted request, missing query param");
+                    return new BadRequestObjectResult(pokeFuncResponse);
+                }
+
+                var apiRes = await ExternalAPIGet(name);
+
+                if (apiRes.IsSuccessStatusCode && apiRes.Content is not null)
+                {
+                    pokemonDetails = ExtractFromJson(apiRes.Content);
+                    if (pokemonDetails is null)
+                    {
+                        msg = $"External API response code: {apiRes.StatusCode}, external API response faulted, data missing fields";
+                        pokeFuncResponse = new PokeFuncResponse(HttpStatusCode.BadGateway, null, msg);
+                        _logger.LogInformation(msg);
+                    }
+                    else
+                    {
+                        pokeFuncResponse = new PokeFuncResponse(HttpStatusCode.OK, pokemonDetails);
+                        _logger.LogInformation($"Pokemon search succeed.");
+                    }
+                }
+                else if (apiRes.StatusCode == System.Net.HttpStatusCode.NotFound)
+                {
+                    pokeFuncResponse = new PokeFuncResponse(HttpStatusCode.NotFound, null, "NotFound");
+                    _logger.LogInformation($"Pokemon with the name of: {name} has not been found");
+                }
+                else
+                {
+                    msg = $"External API response code: {apiRes.StatusCode}, {apiRes.StatusDescription}";
+                    pokeFuncResponse = new PokeFuncResponse(HttpStatusCode.InternalServerError, null, msg);
                     _logger.LogInformation(msg);
                 }
-                else 
-                { 
-                    pokeFuncResponse = new PokeFuncResponse(HttpStatusCode.OK, pokemonDetails); 
-                    _logger.LogInformation($"Pokemon search succeed.");
-                }
+                _logger.LogInformation($"Returning object: {JsonSerializer.Serialize(pokeFuncResponse)}");
+
+                return new JsonResult(pokeFuncResponse);// { StatusCode = (int)pokeFuncResponse.StatusCode }; Should I distinguish between my api response code and external api?
             }
-            else if (apiRes.StatusCode == System.Net.HttpStatusCode.NotFound) 
-            { 
-                pokeFuncResponse = new PokeFuncResponse(HttpStatusCode.NotFound, null, "NotFound");
-                _logger.LogInformation($"Pokemon with the name of: {name} has not been found");
-            }
-            else 
+            catch(AppConfigException ex)
             {
-                msg = $"External API response code: {apiRes.StatusCode}, {apiRes.StatusDescription}";
-                pokeFuncResponse = new PokeFuncResponse(HttpStatusCode.InternalServerError, null, msg);
-                _logger.LogInformation(msg);
+                pokeFuncResponse = new PokeFuncResponse(HttpStatusCode.InternalServerError, null, ex.Message);
+                return new JsonResult(pokeFuncResponse) { StatusCode = (int)HttpStatusCode.InternalServerError };
             }
-            var jsonResult = JsonSerializer.Serialize(pokeFuncResponse);
-            _logger.LogInformation($"Returning object: {jsonResult}");
-            return new OkObjectResult(jsonResult);
+            catch (Exception ex)
+            {
+                pokeFuncResponse = new PokeFuncResponse(HttpStatusCode.InternalServerError, null, $"An unhandled and unexpected exception occured. Message: {ex.Message}");
+                return new JsonResult(pokeFuncResponse) { StatusCode = (int)HttpStatusCode.InternalServerError };
+            }
+        }
+
+        private async Task<RestResponse> ExternalAPIGet(StringValues name)
+        {
+            var pokeApiBaseUrl = _configuration["PokeApiBaseUrl"];
+            if (string.IsNullOrWhiteSpace(pokeApiBaseUrl))
+            {
+                throw new AppConfigException(
+                    "External API base url is not configured. To fix it, add correct pokemon API URL to Application's configuration with 'PokeApiBaseUrl' as a key and URI as value");
+            } 
+            client = new RestClient(pokeApiBaseUrl);
+            var restRequest = new RestRequest($"pokemon/{name}");
+            var apiRes = await client.ExecuteAsync(restRequest);
+            return apiRes;
         }
 
         /// <summary>
